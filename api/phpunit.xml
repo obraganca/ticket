@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+         cacheDirectory=".phpunit.cache">
+    <testsuites>
+        <testsuite name="Unit"><directory>tests/Unit</directory></testsuite>
+        <testsuite name="Feature"><directory>tests/Feature</directory></testsuite>
+        <testsuite name="Concurrency"><directory>tests/Concurrency</directory></testsuite>
+    </testsuites>
+    <source>
+        <include><directory>app</directory></include>
+    </source>
+    <php>
+        <!-- force="true": NUNCA usa o banco de desenvolvimento, mesmo que o .env aponte para ele.
+             DB_HOST/DB_PORT vêm do ambiente (compose: postgres; local: 127.0.0.1). -->
+        <env name="APP_ENV" value="testing" force="true"/>
+        <env name="DB_CONNECTION" value="pgsql" force="true"/>
+        <env name="DB_DATABASE" value="ticketing_test" force="true"/>
+        <env name="CACHE_STORE" value="array" force="true"/>
+        <env name="QUEUE_CONNECTION" value="null" force="true"/>
+        <env name="MAIL_MAILER" value="array" force="true"/>
+        <env name="SESSION_DRIVER" value="array" force="true"/>
+        <env name="ORDERS_RATE_LIMIT_PER_MINUTE" value="0" force="true"/>
+        <env name="LOGIN_RATE_LIMIT_PER_MINUTE" value="5" force="true"/>
+        <env name="ENABLE_DEV_TOOLS" value="true" force="true"/>
+        <env name="GATEWAY_WEBHOOK_SECRET" value="test-secret" force="true"/>
+        <env name="FINANCE_SIM_URL" value="http://finance-sim.test" force="true"/>
+        <env name="RESERVATION_TTL_MINUTES" value="15" force="true"/>
+        <env name="OUTBOX_MAX_ATTEMPTS" value="4" force="true"/>
+        <env name="BCRYPT_ROUNDS" value="4" force="true"/>
+    </php>
+</phpunit>

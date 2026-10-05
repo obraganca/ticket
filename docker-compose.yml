@@ -1,0 +1,110 @@
+# Desenvolvimento local. `make setup` cria api/.env e web/.env; `make up` sobe tudo.
+x-php: &php
+  build: { context: ., dockerfile: docker/api.Dockerfile, target: dev }
+  image: ticketing-api:dev
+  env_file: ./api/.env                 # B11: um único arquivo, o mesmo para todos os containers PHP
+  user: www-data                       # B7: workers/scheduler com o mesmo usuário do php-fpm
+  restart: unless-stopped              # B18: worker que sai (--max-time) ou cai, volta
+  depends_on:
+    api: { condition: service_healthy }
+  volumes:
+    - ./api:/app
+    - api-vendor:/app/vendor
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ticketing
+      POSTGRES_USER: ticketing
+      POSTGRES_PASSWORD: ticketing
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro   # cria ticketing_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ticketing -d ticketing"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  mailpit:
+    image: axllent/mailpit
+    ports: ["8025:8025", "1025:1025"]
+    restart: unless-stopped
+
+  finance-sim:
+    build: ./finance-sim
+    environment:
+      LATENCY_MIN: 2
+      LATENCY_MAX: 5
+      FAILURE_RATE: 0.2
+      FAIL_AFTER_COMMIT_RATE: 0.3
+    ports: ["8080:8080"]
+    restart: unless-stopped
+
+  api:
+    <<: *php
+    user: root                         # o entrypoint ajusta permissões e depois usa su-exec www-data
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    entrypoint: ["/entrypoint.sh"]
+    ports: ["8000:8000"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/api/v1/readyz >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  # Capacidade (B19): o financeiro leva 2-5s (média ~3,5s) por chamada => ~17 vendas/min por worker.
+  # Com 20% de falha (~1,25 tentativa/venda) são ~14 vendas/min/worker; 4 workers ~ 55/min.
+  # Escale com FINANCE_WORKERS=8 make up (ou docker compose up -d --scale worker-finance=8).
+  worker-finance:
+    <<: *php
+    command: ["php", "artisan", "queue:work", "redis", "--queue=finance", "--tries=1", "--max-time=3600", "--sleep=1"]
+    deploy:
+      replicas: ${FINANCE_WORKERS:-4}
+
+  worker-mail:
+    <<: *php
+    command: ["php", "artisan", "queue:work", "redis", "--queue=mail", "--tries=1", "--max-time=3600", "--sleep=1"]
+    deploy:
+      replicas: ${MAIL_WORKERS:-2}
+
+  scheduler:
+    <<: *php
+    command: ["php", "artisan", "schedule:work"]
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.dev.Dockerfile
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000/api/v1
+      VITE_ENABLE_DEV_TOOLS: "true"
+      DOCKER: "true"
+    ports: ["5173:5173"]
+    volumes:
+      - ./web:/app
+      - web-node-modules:/app/node_modules
+    depends_on:
+      api: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  api-vendor:
+  web-node-modules:

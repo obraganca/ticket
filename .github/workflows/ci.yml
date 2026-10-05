@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  api:
+    name: API (Pint + Pest)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ticketing
+          POSTGRES_USER: ticketing
+          POSTGRES_PASSWORD: ticketing
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ticketing" --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5432
+      DB_USERNAME: ticketing
+      DB_PASSWORD: ticketing
+      REDIS_HOST: 127.0.0.1
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: pdo_pgsql, gd, mbstring, intl, bcmath, zip, pcntl, xml
+          coverage: none
+      - name: Dependências (com dev: Pest e Pint)
+        run: composer install --no-interaction --prefer-dist
+      - name: .env (APP_KEY de dev vem do .env.example)
+        run: cp .env.example .env
+      - name: Banco dos testes
+        run: PGPASSWORD=ticketing psql -h 127.0.0.1 -U ticketing -d postgres -c "CREATE DATABASE ticketing_test OWNER ticketing"
+      - name: Lint (Pint)
+        run: vendor/bin/pint --test
+      - name: Testes (Unit + Feature + Concurrency)
+        run: vendor/bin/pest
+
+  web:
+    name: Web (typecheck + testes + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build

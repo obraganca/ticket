@@ -239,15 +239,3 @@ Executado em PHP 8.4.26, Postgres 16, Redis 7 e Mailpit 1.21.8, com 2 workers de
   contrato OpenAPI tipado, não por E2E.
 - O simulador de gateway só existe com `ENABLE_DEV_TOOLS=true` (desligue fora de dev).
 
-## O que não foi validado
-
-- **`docker compose`**: não havia Docker no ambiente. O Dockerfile (estágios `dev`/`prod`), o entrypoint, o compose,
-  o Makefile e o `postgres-init` só tiveram a sintaxe verificada (YAML e `sh -n`). Na primeira subida com Docker, o
-  comportamento de `make setup && make up` deve ser conferido; os workers dependem do healthcheck da `api`.
-- **`composer.lock`**: sem acesso ao Packagist, o `mockery/mockery` foi adicionado resolvendo-o por repositórios VCS do
-  GitHub e o `content-hash` foi recalculado com a API do Composer após remover esses repositórios do `composer.json`.
-  Valide com `composer install` (deve ocorrer sem aviso de lock desatualizado).
-- **GitHub Actions**: o workflow nunca foi executado (nem o repositório existe ainda); os mesmos comandos foram
-  executados localmente.
-- **Desempenho em nginx + php-fpm** e **UI em navegador real** (a tela de admin foi validada pela API e por Vitest).
-# ticket

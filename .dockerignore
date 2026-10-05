@@ -1,0 +1,9 @@
+.git
+api/vendor
+api/.env
+api/storage/logs/*.log
+api/bootstrap/cache/*.php
+api/.phpunit.cache
+web/node_modules
+web/dist
+web/.env

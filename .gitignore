@@ -1,0 +1,21 @@
+# Dependências e build
+vendor/
+node_modules/
+dist/
+# Segredos locais (os .env.example SÃO versionados)
+.env
+.env.*.local
+!.env.example
+# Runtime do Laravel
+storage/logs/*.log
+bootstrap/cache/*.php
+public/storage
+.phpunit.result.cache
+.phpunit.cache/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+# Editor / SO
+.idea/
+.vscode/
+.DS_Store

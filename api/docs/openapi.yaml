@@ -1,0 +1,483 @@
+openapi: 3.1.0
+info:
+  title: Codificar Ticketing API
+  version: "1.1"
+  description: |
+    Contrato fonte-da-verdade (contract-first). O front gera os tipos com
+    `npm run gen:api` (openapi-typescript) a partir deste arquivo.
+
+    **Autenticação**
+    - **Comprador: sem login.** `POST /orders`, `GET /orders/{id}`, `GET /events` e
+      `GET /events/{id}/batches` são públicos. O UUID do pedido (não adivinhável) é o
+      segredo de acesso ao `GET /orders/{id}`, que nunca devolve o documento e mascara o e-mail.
+    - **Admin: e-mail + senha** em `POST /login`, que devolve um token Bearer (Laravel Sanctum).
+      Não existe cadastro público. Sem token => 401; autenticado sem role admin => 403.
+    - **Webhook do gateway:** assinatura HMAC-SHA256 do corpo bruto no header `X-Signature`.
+
+    **Convenções**
+    - Sucesso com corpo: `{ "data": ... }`. Erro: `Error` (com `code` estável).
+    - Compra idempotente: o header `Idempotency-Key` é obrigatório em `POST /orders`.
+servers:
+  - url: /api/v1
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Token Sanctum de um usuário administrador, obtido em `POST /login`.
+    GatewaySignature:
+      type: apiKey
+      in: header
+      name: X-Signature
+      description: "hex(HMAC-SHA256(corpo bruto, GATEWAY_WEBHOOK_SECRET))."
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: "Código estável, ex.: sold_out, batch_inactive, validation_failed, idempotency_payload_mismatch, rate_limited, forbidden."
+            message: { type: string }
+            fields:
+              type: object
+              additionalProperties: { type: array, items: { type: string } }
+              description: Presente em erros de validação (422).
+            retry_after: { type: integer, description: "Segundos sugeridos antes de nova tentativa (429/503)." }
+
+    EventSummary:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        image_url: { type: [string, "null"] }
+      required: [id, name]
+
+    PublicBatchLine:
+      type: object
+      description: Uma linha por tipo de ingresso, sempre com o lote ativo daquele tipo.
+      properties:
+        ticket_type_id: { type: integer }
+        name: { type: string, description: "Nome do TIPO de ingresso (ex.: Pista)." }
+        id: { type: [integer, "null"], description: "Id do lote ativo; null se não houver lote ativo." }
+        batch_label: { type: [string, "null"] }
+        price_cents: { type: [integer, "null"] }
+        available: { type: integer }
+        sold_out: { type: boolean }
+      required: [ticket_type_id, name, id, price_cents, available, sold_out]
+
+    BatchSummary:
+      $ref: "#/components/schemas/PublicBatchLine"
+
+    OrderStatus:
+      type: string
+      enum: [pending, paid, declined, expired, refunded, refund_required]
+
+    Order:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/OrderStatus" }
+        batch_id: { type: integer }
+        batch_name: { type: string }
+        quantity: { type: integer }
+        total_cents: { type: integer }
+        buyer_email: { type: string, description: "E-mail parcialmente mascarado (ex.: ma***@exemplo.com). O documento nunca é devolvido." }
+        expires_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+      required: [id, status, batch_id, batch_name, quantity, total_cents, buyer_email, created_at]
+
+    BuyerInput:
+      type: object
+      required: [name, email, document]
+      properties:
+        name: { type: string, maxLength: 255 }
+        email: { type: string, format: email, maxLength: 255 }
+        document: { type: string, description: "CPF válido, com ou sem máscara." }
+
+    TicketHolderInput:
+      type: object
+      required: [name, email]
+      properties:
+        name: { type: string, maxLength: 255 }
+        email: { type: string, format: email, maxLength: 255 }
+
+    CreateOrderInput:
+      type: object
+      required: [batch_id, quantity, buyer]
+      properties:
+        batch_id: { type: integer }
+        quantity: { type: integer, minimum: 1, maximum: 6 }
+        buyer: { $ref: "#/components/schemas/BuyerInput" }
+        tickets:
+          type: array
+          description: "OPCIONAL. Titular de cada ingresso; se informado, o tamanho deve ser igual a `quantity`. Ausente => o titular é o comprador."
+          items: { $ref: "#/components/schemas/TicketHolderInput" }
+
+    User:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { type: string, enum: [customer, admin] }
+      required: [id, name, email, role]
+
+    LoginInput:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, format: password }
+
+    AuthPayload:
+      type: object
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        token: { type: string, description: "Token opaco (Sanctum). Enviar como 'Authorization: Bearer <token>'." }
+      required: [user, token]
+
+    PaymentWebhookInput:
+      type: object
+      required: [event_id, order_id, type, occurred_at]
+      properties:
+        event_id: { type: string, maxLength: 100, description: "Identificador próprio do aviso. O mesmo event_id enviado N vezes tem efeito UMA vez." }
+        order_id: { type: string, format: uuid }
+        type: { type: string, enum: [approved, declined, refunded] }
+        occurred_at: { type: string, format: date-time }
+
+    GatewaySimulationInput:
+      type: object
+      required: [order_id]
+      properties:
+        order_id: { type: string, format: uuid }
+        times: { type: integer, minimum: 2, maximum: 20, description: "Só para `duplicate` (padrão 5)." }
+
+    DashboardBatch:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        price_cents: { type: integer }
+        total: { type: integer }
+        sold: { type: integer }
+        pending: { type: integer, description: "Aguardando pagamento (reservado)." }
+        available: { type: integer }
+        revenue_cents: { type: integer }
+      required: [id, name, price_cents, total, sold, pending, available, revenue_cents]
+
+    DashboardEvent:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        totals:
+          type: object
+          properties:
+            sold: { type: integer }
+            pending: { type: integer }
+            available: { type: integer }
+            revenue_cents: { type: integer }
+          required: [sold, pending, available, revenue_cents]
+        batches:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardBatch" }
+      required: [id, name, totals, batches]
+
+    DashboardSnapshot:
+      type: object
+      properties:
+        generated_at: { type: string, format: date-time }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardEvent" }
+        jobs:
+          type: object
+          description: "Outbox do pós-pagamento. `failed` > 0 exige `php artisan outbox:retry --all-failed`."
+          properties:
+            pending: { type: integer }
+            running: { type: integer }
+            failed: { type: integer }
+          required: [pending, running, failed]
+      required: [generated_at, events, jobs]
+
+    PaginationLinks:
+      type: object
+      properties:
+        first: { type: [string, "null"] }
+        last: { type: [string, "null"] }
+        prev: { type: [string, "null"] }
+        next: { type: [string, "null"] }
+
+    PaginationMeta:
+      type: object
+      properties:
+        current_page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
+        last_page: { type: integer }
+
+  responses:
+    Error:
+      description: Erro padronizado
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthenticated:
+      description: Sem token ou token inválido (code `unauthenticated`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Autenticado, mas não é administrador (code `forbidden`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ValidationError:
+      description: Corpo inválido (`fields` traz o detalhe por campo).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+paths:
+  /readyz:
+    get:
+      summary: Prontidão (banco + Redis). Usada no healthcheck do compose.
+      security: []
+      responses:
+        "200": { description: Pronto }
+        "503": { description: Dependência fora do ar }
+
+  /events:
+    get:
+      summary: Lista eventos (público)
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/EventSummary" } }
+                required: [data]
+
+  /events/{eventId}/batches:
+    get:
+      summary: Lotes à venda de um evento, um por tipo de ingresso (público)
+      security: []
+      parameters:
+        - { name: eventId, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/PublicBatchLine" } }
+                required: [data]
+        "404": { $ref: "#/components/responses/Error" }
+
+  /orders:
+    post:
+      summary: Cria um pedido (público, sem login)
+      description: |
+        Reserva atomicamente o estoque do lote e cria o pedido `pending`. Exige `Idempotency-Key`:
+        o mesmo par chave + corpo devolve o MESMO pedido (200 + `Idempotent-Replay: true`),
+        cobrindo clique duplo e reenvio por queda de conexão. A mesma chave com corpo diferente
+        responde 422 `idempotency_payload_mismatch`. O pedido expira (e a reserva volta ao lote)
+        após `RESERVATION_TTL_MINUTES` sem pagamento.
+      security: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, maxLength: 255 }
+          description: Gere um UUID por tentativa de compra e reuse nos reenvios.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateOrderInput" }
+      responses:
+        "201":
+          description: Pedido criado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Order" }
+                required: [data]
+        "200":
+          description: Replay idempotente (mesmo pedido, header `Idempotent-Replay`)
+          headers:
+            Idempotent-Replay: { schema: { type: string, enum: ["true"] } }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Order" }
+                required: [data]
+        "400":
+          description: "`Idempotency-Key` ausente (code `idempotency_key_required`)."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "409":
+          description: "Lote esgotado (`sold_out`) ou inativo (`batch_inactive`)."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422":
+          description: "Validação (CPF, e-mail, quantidade...) ou `idempotency_payload_mismatch`."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "429":
+          description: "Limite por IP (`ORDERS_RATE_LIMIT_PER_MINUTE`, 0 desliga). Honre `Retry-After`."
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: Chave de idempotência em processamento; tente de novo em instantes.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /orders/{orderId}:
+    get:
+      summary: Situação de um pedido (público; o UUID é o segredo de acesso)
+      security: []
+      parameters:
+        - { name: orderId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Order" }
+                required: [data]
+        "404": { $ref: "#/components/responses/Error" }
+
+  /webhooks/payments:
+    post:
+      summary: Aviso do gateway de pagamento (aprovado, recusado ou reembolsado)
+      description: |
+        Idempotente por `event_id`; tolera avisos repetidos e fora de ordem; responde rápido
+        (só estado + outbox, sem e-mail/PDF/financeiro na requisição).
+        Pedido inexistente => 404 sem gravar o aviso.
+      security: [{ GatewaySignature: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentWebhookInput" }
+      responses:
+        "200": { description: Processado (ou já processado antes) }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /login:
+    post:
+      summary: Login de administrador (com throttle)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginInput" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/AuthPayload" }
+                required: [data]
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/Error" }
+
+  /logout:
+    post:
+      summary: Revoga o token atual
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200": { description: OK }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /me:
+    get:
+      summary: Usuário autenticado
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/User" }
+                required: [data]
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /admin/dashboard:
+    get:
+      summary: Painel de vendas por evento e lote (admin)
+      description: |
+        Lê só os contadores do lote (O(nº de lotes), nunca COUNT em `orders`), com cache de ~1s
+        e `ETag`/`If-None-Match` (304 quando nada mudou): ~30 pessoas podem atualizar a cada
+        poucos segundos sem degradar a compra.
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: If-None-Match, in: header, required: false, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardSnapshot" }
+        "304": { description: Sem mudanças }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/dev/gateway/{action}:
+    post:
+      summary: Simulador do gateway (admin; só com ENABLE_DEV_TOOLS=true)
+      description: |
+        Dispara avisos assinados para o webhook real. Ações: `approve`, `decline`, `refund`,
+        `duplicate` (4.2a: mesmo aviso N vezes em paralelo), `out-of-order` (4.2b: refunded antes
+        de approved) e `retry-on-timeout` (4.2c: o gateway desiste da resposta e reenvia o mesmo aviso).
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: action
+          in: path
+          required: true
+          schema: { type: string, enum: [approve, decline, refund, duplicate, out-of-order, retry-on-timeout] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GatewaySimulationInput" }
+      responses:
+        "200":
+          description: Resultado de cada chamada ao webhook
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  result: { type: object, additionalProperties: true }
+                required: [ok, result]
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/ValidationError" }
